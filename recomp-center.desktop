@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Recomp Center
+GenericName=Recomp & Decomp Game Hub
+Comment=Download, update and manage native Recompilation and Decompilation PC ports
+Exec=recomp-center
+Icon=recomp-center
+Terminal=false
+Type=Application
+Categories=Game;Utility;PackageManager;
+Keywords=recomp;decomp;zelda;n64;jak;diablo;sonic;mario;ports;emulation;
+StartupNotify=true

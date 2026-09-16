@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Recomp Center launcher script
+
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${APP_DIR}:${PYTHONPATH}"
+
+exec python3 "${APP_DIR}/main.py" "$@"

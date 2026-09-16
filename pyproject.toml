@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recomp-center"
+version = "1.0.0"
+description = "Modernes Recomp & Decomp Center zum Herunterladen, Aktualisieren und Verwalten nativer PC-Ports"
+readme = "README.md"
+authors = [{ name = "Julian" }]
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.4.0",
+]
+
+[project.scripts]
+recomp-center = "recomp_center.app:main"

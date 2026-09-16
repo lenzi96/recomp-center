@@ -1,0 +1,1413 @@
+"""
+Update manager and GitHub release updater for Recomp Center.
+Integrated from Cachy Security Suite pattern:
+- Multi-component status check (Recomp Center App, Build Toolchains, Game Catalog & ROM Matcher)
+- Real-time GitHub Releases API checking (public and token-authorized private repos)
+- Live terminal execution for git pull / release tarball download & installation
+- Background silent checking with notification badge
+- Changelog viewer (GitHub release notes + CHANGELOG.md)
+- 1-click self-update and clean application restart
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+# Ensure parent directory of recomp_center is in sys.path
+_pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _pkg_root not in sys.path:
+    sys.path.insert(0, _pkg_root)
+
+from PyQt6.QtCore import QDateTime, QProcess, QSettings, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QTextCursor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QTabWidget,
+    QTextBrowser,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+import recomp_center
+from recomp_center.data.catalog import get_all_projects
+
+
+@dataclass
+class UpdateInfo:
+    app_installed: str = recomp_center.__version__
+    app_remote: str = recomp_center.__version__
+    app_has_update: bool = False
+
+    github_repo: Optional[str] = None
+    github_release_url: Optional[str] = None
+    github_tarball_url: Optional[str] = None
+    github_asset_api_url: Optional[str] = None
+    github_release_notes: Optional[str] = None
+    github_auth_error: bool = False
+    github_error_message: Optional[str] = None
+
+    build_tools_installed: bool = False
+    build_tools_details: str = ""
+    build_tools_missing: List[str] = None
+
+    catalog_count: int = 200
+    check_error: Optional[str] = None
+    checked_at: Optional[datetime.datetime] = None
+
+    def total_updates_pending(self) -> int:
+        count = 0
+        if self.app_has_update:
+            count += 1
+        return count
+
+
+DEFAULT_GITHUB_REPO = "lenzi96/recomp-center"
+
+
+def get_source_dir() -> str:
+    """Returns the base directory of the repository/installation."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_github_repo() -> str:
+    """Retrieves configured or git-detected GitHub repository (e.g. 'owner/repo')."""
+    settings = QSettings("RecompCenter", "RecompCenter")
+    custom = settings.value("updater/github_repo", "").strip()
+    if custom:
+        return custom
+
+    # Also check ~/.local/share/recomp-center/settings.json if present
+    cfg_file = os.path.expanduser("~/.local/share/recomp-center/settings.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("github_repo"):
+                    return data["github_repo"]
+        except Exception:
+            pass
+
+    source_dir = get_source_dir()
+    try:
+        res = subprocess.run(
+            ["git", "-C", source_dir, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            url = res.stdout.strip()
+            m = re.search(r"github\.com[:/]([^/]+)/([^/\.]+)", url)
+            if m:
+                repo = f"{m.group(1)}/{m.group(2)}"
+                return repo[:-4] if repo.endswith(".git") else repo
+    except Exception:
+        pass
+
+    return DEFAULT_GITHUB_REPO
+
+
+def set_github_repo(repo_str: str) -> None:
+    """Saves configured GitHub repository and updates git remote origin if in git repo."""
+    repo_clean = repo_str.strip()
+    m = re.search(r"github\.com[:/]([^/]+)/([^/\.]+)", repo_clean)
+    if m:
+        repo_clean = f"{m.group(1)}/{m.group(2)}"
+        if repo_clean.endswith(".git"):
+            repo_clean = repo_clean[:-4]
+
+    settings = QSettings("RecompCenter", "RecompCenter")
+    settings.setValue("updater/github_repo", repo_clean)
+
+    cfg_file = os.path.expanduser("~/.local/share/recomp-center/settings.json")
+    try:
+        data = {}
+        if os.path.exists(cfg_file):
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data["github_repo"] = repo_clean
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+    # If in git repo, configure remote origin
+    source_dir = get_source_dir()
+    if os.path.isdir(os.path.join(source_dir, ".git")) and repo_clean and shutil.which("git"):
+        target_url = f"https://github.com/{repo_clean}.git"
+        check_rem = subprocess.run(["git", "-C", source_dir, "remote"], capture_output=True, text=True, check=False)
+        if "origin" in check_rem.stdout:
+            subprocess.run(["git", "-C", source_dir, "remote", "set-url", "origin", target_url], check=False)
+        else:
+            subprocess.run(["git", "-C", source_dir, "remote", "add", "origin", target_url], check=False)
+
+
+def get_github_token() -> Optional[str]:
+    """Retrieves GitHub personal access token from QSettings, settings.json, env, or ~/.git-credentials."""
+    settings = QSettings("RecompCenter", "RecompCenter")
+    token = settings.value("updater/github_token", "").strip()
+    if token:
+        return token
+
+    # Check settings.json
+    cfg_file = os.path.expanduser("~/.local/share/recomp-center/settings.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                tok = data.get("github_token", "").strip()
+                if tok:
+                    return tok
+        except Exception:
+            pass
+
+    env_token = os.environ.get("GITHUB_TOKEN", "").strip() or os.environ.get("GH_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    git_cred_path = os.path.expanduser("~/.git-credentials")
+    if os.path.exists(git_cred_path):
+        try:
+            with open(git_cred_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "github.com" in line:
+                        m = re.search(r":([^@:]+)@github\.com", line)
+                        if m:
+                            tok = m.group(1).strip()
+                            if tok.startswith(("github_pat_", "ghp_", "gho_")):
+                                return tok
+        except Exception:
+            pass
+
+    return None
+
+
+def set_github_token(token_str: str) -> None:
+    """Saves configured GitHub personal access token in QSettings and settings.json."""
+    token_clean = token_str.strip()
+    settings = QSettings("RecompCenter", "RecompCenter")
+    settings.setValue("updater/github_token", token_clean)
+
+    cfg_file = os.path.expanduser("~/.local/share/recomp-center/settings.json")
+    try:
+        data = {}
+        if os.path.exists(cfg_file):
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data["github_token"] = token_clean
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def compare_versions(v1: str, v2: str) -> int:
+    """Uses vercmp if available, else standard fallback."""
+    v1_clean = v1.lstrip("v").strip()
+    v2_clean = v2.lstrip("v").strip()
+
+    if shutil.which("vercmp"):
+        try:
+            res = subprocess.run(
+                ["vercmp", v1_clean, v2_clean],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return int(res.stdout.strip())
+        except Exception:
+            pass
+
+    # Simple numeric fallback
+    parts1 = [int(p) for p in re.findall(r"\d+", v1_clean)]
+    parts2 = [int(p) for p in re.findall(r"\d+", v2_clean)]
+    return (parts1 > parts2) - (parts1 < parts2)
+
+
+class UpdateCheckerWorker(QThread):
+    finished = pyqtSignal(UpdateInfo)
+
+    def run(self):
+        info = UpdateInfo()
+        info.app_installed = recomp_center.__version__
+        info.checked_at = datetime.datetime.now()
+        info.catalog_count = len(get_all_projects())
+
+        # ----------------------------------------------------------------------
+        # 1. Check Build & Toolchain Status (for compiling source decomps)
+        # ----------------------------------------------------------------------
+        missing = []
+        found = []
+        for tool, name in [
+            ("gcc", "GCC"),
+            ("g++", "G++"),
+            ("cmake", "CMake"),
+            ("ninja", "Ninja"),
+            ("git", "Git"),
+            ("make", "Make"),
+        ]:
+            if shutil.which(tool):
+                found.append(name)
+            else:
+                missing.append(name)
+
+        info.build_tools_missing = missing
+        if not missing:
+            info.build_tools_installed = True
+            info.build_tools_details = f"Vollständig: {', '.join(found)}"
+        else:
+            info.build_tools_installed = False
+            info.build_tools_details = f"Vorhanden: {', '.join(found) if found else 'Keine'} (Fehlt: {', '.join(missing)})"
+
+        # ----------------------------------------------------------------------
+        # 2. Check GitHub Releases API for Recomp Center
+        # ----------------------------------------------------------------------
+        gh_repo = get_github_repo()
+        gh_token = get_github_token()
+        info.github_repo = gh_repo
+
+        if gh_repo:
+            try:
+                gh_url = f"https://api.github.com/repos/{gh_repo}/releases/latest"
+                headers = {
+                    "User-Agent": f"recomp-center/{info.app_installed}",
+                    "Accept": "application/vnd.github+json",
+                }
+                if gh_token:
+                    headers["Authorization"] = f"Bearer {gh_token}"
+
+                gh_req = urllib.request.Request(gh_url, headers=headers)
+                with urllib.request.urlopen(gh_req, timeout=8) as gh_resp:
+                    if gh_resp.status == 200:
+                        gh_data = json.loads(gh_resp.read().decode())
+                        tag = gh_data.get("tag_name", "").lstrip("v").strip()
+                        if tag:
+                            info.app_remote = tag
+                            info.github_release_url = gh_data.get("html_url", "")
+                            info.github_release_notes = gh_data.get("body", "")
+                            for asset in gh_data.get("assets", []):
+                                if asset.get("name", "").endswith((".tar.gz", ".zip", ".tar.xz")):
+                                    info.github_tarball_url = asset.get("browser_download_url", "")
+                                    info.github_asset_api_url = asset.get("url", "")
+                                    break
+            except urllib.error.HTTPError as err:
+                if err.code in (401, 403, 404):
+                    info.github_auth_error = True
+                    if not gh_token:
+                        info.github_error_message = "Repository ist privat oder existiert noch nicht. Bitte GitHub-Token hinterlegen oder Repo öffentlich machen."
+                    else:
+                        info.github_error_message = f"GitHub-Fehler {err.code}: Token ungültig oder unzureichende Leserechte."
+                else:
+                    info.github_error_message = f"GitHub HTTP-Fehler {err.code}"
+            except Exception as err:
+                info.github_error_message = f"Netzwerkfehler: {str(err)}"
+
+        # Compare versions
+        if info.app_installed and info.app_remote and info.app_remote != "Unbekannt":
+            cmp_res = compare_versions(info.app_installed, info.app_remote)
+            info.app_has_update = cmp_res < 0
+
+        self.finished.emit(info)
+
+
+@dataclass
+class UpdateStep:
+    name: str
+    command: List[str]
+    description: str
+    is_app_update: bool = False
+
+
+class BatchUpdateWorker(QThread):
+    step_started = pyqtSignal(int, int, str)  # current_idx, total_steps, title
+    output_line = pyqtSignal(str)
+    all_completed = pyqtSignal(bool, str, bool)  # success, message, app_was_updated
+
+    def __init__(self, steps: List[UpdateStep]):
+        super().__init__()
+        self.steps = steps
+        self.process: Optional[subprocess.Popen] = None
+        self._is_cancelled = False
+        self.app_was_updated = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=1)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+
+    def run(self):
+        total = len(self.steps)
+        if total == 0:
+            self.all_completed.emit(True, "Keine anstehenden Updates.", False)
+            return
+
+        all_success = True
+        failed_steps = []
+
+        for idx, step in enumerate(self.steps, start=1):
+            if self._is_cancelled:
+                self.output_line.emit("\n[!] Vorgang durch Benutzer abgebrochen.")
+                self.all_completed.emit(False, "Aktualisierung abgebrochen.", self.app_was_updated)
+                return
+
+            self.step_started.emit(idx, total, step.name)
+            self.output_line.emit("\n=======================================================")
+            self.output_line.emit(f"[{idx}/{total}] {step.name}")
+            self.output_line.emit(f"Befehl: {' '.join(step.command)}")
+            self.output_line.emit("=======================================================\n")
+
+            env = os.environ.copy()
+            source_dir = get_source_dir()
+            if "PYTHONPATH" in env and env["PYTHONPATH"]:
+                env["PYTHONPATH"] = f"{source_dir}:{env['PYTHONPATH']}"
+            else:
+                env["PYTHONPATH"] = source_dir
+
+            try:
+                self.process = subprocess.Popen(
+                    step.command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    env=env,
+                    cwd=source_dir if os.path.exists(source_dir) else None,
+                )
+
+                if self.process.stdout:
+                    for line in iter(self.process.stdout.readline, ""):
+                        if self._is_cancelled:
+                            break
+                        self.output_line.emit(line.rstrip())
+
+                self.process.wait()
+                ret = self.process.returncode if self.process else 1
+
+                if ret != 0:
+                    all_success = False
+                    failed_steps.append(step.name)
+                    self.output_line.emit(f"\n[✗] Schritt '{step.name}' mit Statuscode {ret} beendet.")
+                else:
+                    self.output_line.emit(f"\n[✓] Schritt '{step.name}' erfolgreich abgeschlossen.")
+                    if step.is_app_update:
+                        self.app_was_updated = True
+
+            except Exception as exc:
+                all_success = False
+                failed_steps.append(step.name)
+                self.output_line.emit(f"\n[✗] Fehler bei '{step.name}': {exc}")
+
+        if all_success:
+            summary = "Alle gewählten Aktualisierungen wurden erfolgreich abgeschlossen."
+        else:
+            summary = f"Einige Schritte schlugen fehl: {', '.join(failed_steps)}"
+
+        self.all_completed.emit(all_success, summary, self.app_was_updated)
+
+
+class UpdateDialog(QDialog):
+    """Modern Dark-Slate Update & System Center Dialog for Recomp Center."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Update- & System-Center – Recomp Center")
+        self.resize(780, 620)
+        self.setMinimumSize(700, 540)
+
+        self.checker_worker: Optional[UpdateCheckerWorker] = None
+        self.batch_worker: Optional[BatchUpdateWorker] = None
+        self.latest_info: Optional[UpdateInfo] = None
+
+        self.init_ui()
+        self.start_check()
+
+    def init_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(20, 18, 20, 16)
+        root_layout.setSpacing(12)
+
+        # ----------------------------------------------------------------------
+        # Top Header
+        # ----------------------------------------------------------------------
+        header_layout = QHBoxLayout()
+        header_text = QVBoxLayout()
+        header_text.setSpacing(2)
+
+        lbl_title = QLabel("Update- & System-Center")
+        lbl_title.setStyleSheet("font-size: 19px; font-weight: 800; color: #f8fafc;")
+        lbl_desc = QLabel("Verwalte Recomp Center Version, GitHub-Releases, Build-Tools und Spielekatalog.")
+        lbl_desc.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        lbl_desc.setWordWrap(True)
+
+        header_text.addWidget(lbl_title)
+        header_text.addWidget(lbl_desc)
+        header_layout.addLayout(header_text)
+        header_layout.addStretch()
+
+        self.btn_refresh = QPushButton("  Auf Updates prüfen")
+        self.btn_refresh.setIcon(QIcon.fromTheme("view-refresh"))
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.setStyleSheet("""
+            QPushButton {
+                padding: 7px 14px;
+                border-radius: 6px;
+                border: 1px solid #334155;
+                background: #1e293b;
+                color: #f8fafc;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: #334155; }
+            QPushButton:disabled { opacity: 0.5; }
+        """)
+        self.btn_refresh.clicked.connect(self.start_check)
+        header_layout.addWidget(self.btn_refresh)
+
+        self.btn_update_all = QPushButton("  🚀 Alle aktualisieren")
+        self.btn_update_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update_all.setEnabled(False)
+        self.btn_update_all.setStyleSheet("""
+            QPushButton {
+                padding: 7px 16px;
+                border-radius: 6px;
+                background-color: #0284c7;
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 700;
+                border: none;
+            }
+            QPushButton:hover { background-color: #0369a1; }
+            QPushButton:disabled { background-color: #334155; color: #64748b; }
+        """)
+        self.btn_update_all.clicked.connect(self.run_update_all)
+        header_layout.addWidget(self.btn_update_all)
+
+        root_layout.addLayout(header_layout)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background: transparent;
+            }
+            QProgressBar::chunk {
+                background-color: #38bdf8;
+                border-radius: 2px;
+            }
+        """)
+        root_layout.addWidget(self.progress_bar)
+
+        # ----------------------------------------------------------------------
+        # Tab Widget
+        # ----------------------------------------------------------------------
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                background-color: #0f172a;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #090e1a;
+                color: #94a3b8;
+                padding: 8px 18px;
+                border: 1px solid #1e293b;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0f172a;
+                color: #f8fafc;
+                border-bottom: 2px solid #38bdf8;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #1e293b;
+                color: #f8fafc;
+            }
+        """)
+
+        # Tab 1: Status & Komponenten
+        self.tab_components = QWidget()
+        self.init_components_tab()
+        self.tabs.addTab(self.tab_components, "Status & Komponenten")
+
+        # Tab 2: Was ist neu? (Changelog)
+        self.tab_changelog = QWidget()
+        self.init_changelog_tab()
+        self.tabs.addTab(self.tab_changelog, "Was ist neu? (Changelog)")
+
+        # Tab 3: Terminal-Ausgabe
+        self.tab_log = QWidget()
+        self.init_log_tab()
+        self.tabs.addTab(self.tab_log, "Terminal-Ausgabe")
+
+        root_layout.addWidget(self.tabs, stretch=1)
+
+        # ----------------------------------------------------------------------
+        # Bottom Bar
+        # ----------------------------------------------------------------------
+        bottom_layout = QHBoxLayout()
+        self.lbl_status_summary = QLabel("Bereit.")
+        self.lbl_status_summary.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        bottom_layout.addWidget(self.lbl_status_summary)
+        bottom_layout.addStretch()
+
+        self.btn_cancel = QPushButton("Abbrechen")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                padding: 6px 14px;
+                border-radius: 6px;
+                background-color: #dc2626;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                border: none;
+            }
+            QPushButton:hover { background-color: #b91c1c; }
+        """)
+        self.btn_cancel.clicked.connect(self.cancel_active_process)
+        bottom_layout.addWidget(self.btn_cancel)
+
+        btn_close = QPushButton("Schließen")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.clicked.connect(self.accept)
+        btn_close.setStyleSheet("""
+            QPushButton {
+                padding: 7px 18px;
+                border-radius: 6px;
+                border: 1px solid #334155;
+                background: #1e293b;
+                color: #f8fafc;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: #334155; }
+        """)
+        bottom_layout.addWidget(btn_close)
+
+        root_layout.addLayout(bottom_layout)
+
+    # --------------------------------------------------------------------------
+    # Tab 1: Components View
+    # --------------------------------------------------------------------------
+    def init_components_tab(self):
+        scroll = QScrollArea(self.tab_components)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(12, 14, 12, 14)
+        layout.setSpacing(12)
+
+        # ----------------------------------------------------------------------
+        # Card 1: Recomp Center App (GUI & Core)
+        # ----------------------------------------------------------------------
+        card_gui = QFrame()
+        card_gui.setObjectName("cardGui")
+        card_gui.setStyleSheet("""
+            QFrame#cardGui {
+                background-color: #131b2e;
+                border: 1px solid #1e293b;
+                border-radius: 10px;
+            }
+            QFrame#cardGui QLabel { background: transparent; border: none; }
+        """)
+        c1_layout = QHBoxLayout(card_gui)
+        c1_layout.setContentsMargins(14, 12, 14, 12)
+        c1_layout.setSpacing(12)
+
+        icon_c1 = QLabel("⚡")
+        icon_c1.setStyleSheet("font-size: 26px; color: #38bdf8;")
+        c1_layout.addWidget(icon_c1)
+
+        c1_text = QVBoxLayout()
+        c1_text.setSpacing(2)
+        lbl_c1_title = QLabel("Recomp Center (Anwendung & Launcher)")
+        lbl_c1_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #f8fafc;")
+        self.lbl_c1_version = QLabel(f"Installiert: v{recomp_center.__version__}")
+        self.lbl_c1_version.setStyleSheet("font-size: 11px; color: #cbd5e1;")
+        self.lbl_c1_github = QLabel("GitHub: Prüfe...")
+        self.lbl_c1_github.setStyleSheet("font-size: 10px; color: #94a3b8;")
+        c1_text.addWidget(lbl_c1_title)
+        c1_text.addWidget(self.lbl_c1_version)
+        c1_text.addWidget(self.lbl_c1_github)
+        c1_layout.addLayout(c1_text, stretch=1)
+
+        self.badge_c1 = QLabel("✓ Aktuell")
+        self.badge_c1.setStyleSheet("background-color: rgba(16, 185, 129, 0.15); color: #10b981; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+        c1_layout.addWidget(self.badge_c1)
+
+        c1_btn_layout = QVBoxLayout()
+        c1_btn_layout.setSpacing(4)
+
+        self.btn_update_gui = QPushButton("Neu installieren")
+        self.btn_update_gui.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update_gui.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: 1px solid #334155;
+                background: #1e293b;
+                color: #f8fafc;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: #334155; }
+        """)
+        self.btn_update_gui.clicked.connect(self.reinstall_gui)
+        c1_btn_layout.addWidget(self.btn_update_gui)
+
+        self.btn_link_github = QPushButton("🔗 GitHub-Repo...")
+        self.btn_link_github.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_link_github.setStyleSheet("""
+            QPushButton {
+                padding: 4px 8px;
+                border-radius: 5px;
+                border: 1px solid #334155;
+                background: rgba(255, 255, 255, 0.05);
+                color: #94a3b8;
+                font-size: 10px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.1); color: #ffffff; }
+        """)
+        self.btn_link_github.clicked.connect(self.configure_github_repo)
+        c1_btn_layout.addWidget(self.btn_link_github)
+
+        c1_layout.addLayout(c1_btn_layout)
+        layout.addWidget(card_gui)
+
+        # ----------------------------------------------------------------------
+        # Card 2: Build & Toolchains (GCC, Clang, CMake, Ninja, Git)
+        # ----------------------------------------------------------------------
+        card_tools = QFrame()
+        card_tools.setObjectName("cardTools")
+        card_tools.setStyleSheet("""
+            QFrame#cardTools {
+                background-color: #131b2e;
+                border: 1px solid #1e293b;
+                border-radius: 10px;
+            }
+            QFrame#cardTools QLabel { background: transparent; border: none; }
+        """)
+        c2_layout = QHBoxLayout(card_tools)
+        c2_layout.setContentsMargins(14, 12, 14, 12)
+        c2_layout.setSpacing(12)
+
+        icon_c2 = QLabel("🛠️")
+        icon_c2.setStyleSheet("font-size: 24px;")
+        c2_layout.addWidget(icon_c2)
+
+        c2_text = QVBoxLayout()
+        c2_text.setSpacing(2)
+        lbl_c2_title = QLabel("Compiler & Build-Tools (für Source-Decomps & Ports)")
+        lbl_c2_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #f8fafc;")
+        self.lbl_c2_status = QLabel("Prüfe System-Buildtools...")
+        self.lbl_c2_status.setStyleSheet("font-size: 11px; color: #cbd5e1;")
+        c2_text.addWidget(lbl_c2_title)
+        c2_text.addWidget(self.lbl_c2_status)
+        c2_layout.addLayout(c2_text, stretch=1)
+
+        self.badge_c2 = QLabel("Prüfe...")
+        self.badge_c2.setStyleSheet("background-color: rgba(59, 130, 246, 0.15); color: #38bdf8; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+        c2_layout.addWidget(self.badge_c2)
+
+        self.btn_install_tools = QPushButton("Tools installieren")
+        self.btn_install_tools.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_install_tools.setStyleSheet("""
+            QPushButton {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: 600;
+                font-size: 11px;
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #0369a1; }
+            QPushButton:disabled { background-color: #334155; color: #64748b; }
+        """)
+        self.btn_install_tools.clicked.connect(self.install_build_tools)
+        c2_layout.addWidget(self.btn_install_tools)
+
+        layout.addWidget(card_tools)
+
+        # ----------------------------------------------------------------------
+        # Card 3: Game Catalog & ROM Matcher Engine
+        # ----------------------------------------------------------------------
+        card_cat = QFrame()
+        card_cat.setObjectName("cardCat")
+        card_cat.setStyleSheet("""
+            QFrame#cardCat {
+                background-color: #131b2e;
+                border: 1px solid #1e293b;
+                border-radius: 10px;
+            }
+            QFrame#cardCat QLabel { background: transparent; border: none; }
+        """)
+        c3_layout = QHBoxLayout(card_cat)
+        c3_layout.setContentsMargins(14, 12, 14, 12)
+        c3_layout.setSpacing(12)
+
+        icon_c3 = QLabel("🎮")
+        icon_c3.setStyleSheet("font-size: 24px;")
+        c3_layout.addWidget(icon_c3)
+
+        c3_text = QVBoxLayout()
+        c3_text.setSpacing(2)
+        lbl_c3_title = QLabel("Recomp Projekt-Katalog & ROM-Matcher")
+        lbl_c3_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #f8fafc;")
+        lbl_c3_desc = QLabel("200 kuratierte Projekte aktiv │ Doctor V64 Byteswap-Konverter (4ms)")
+        lbl_c3_desc.setStyleSheet("font-size: 11px; color: #cbd5e1;")
+        c3_text.addWidget(lbl_c3_title)
+        c3_text.addWidget(lbl_c3_desc)
+        c3_layout.addLayout(c3_text, stretch=1)
+
+        self.badge_c3 = QLabel("✓ 200 Titel")
+        self.badge_c3.setStyleSheet("background-color: rgba(16, 185, 129, 0.15); color: #10b981; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+        c3_layout.addWidget(self.badge_c3)
+
+        self.btn_refresh_catalog = QPushButton("Katalog prüfen")
+        self.btn_refresh_catalog.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh_catalog.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: 1px solid #334155;
+                background: #1e293b;
+                color: #f8fafc;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background: #334155; }
+        """)
+        self.btn_refresh_catalog.clicked.connect(self.start_check)
+        c3_layout.addWidget(self.btn_refresh_catalog)
+
+        layout.addWidget(card_cat)
+        layout.addStretch()
+
+        scroll.setWidget(container)
+        tab_layout = QVBoxLayout(self.tab_components)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+
+    # --------------------------------------------------------------------------
+    # Tab 2: Changelog View
+    # --------------------------------------------------------------------------
+    def init_changelog_tab(self):
+        layout = QVBoxLayout(self.tab_changelog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        self.txt_changelog = QTextBrowser()
+        self.txt_changelog.setOpenExternalLinks(True)
+        self.txt_changelog.setStyleSheet("""
+            QTextBrowser {
+                background-color: #0c1220;
+                color: #f1f5f9;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 14px;
+                font-size: 12px;
+                line-height: 1.5;
+            }
+        """)
+
+        changelog_content = self.load_changelog()
+        self.txt_changelog.setMarkdown(changelog_content)
+        layout.addWidget(self.txt_changelog)
+
+    def load_changelog(self) -> str:
+        content = ""
+        if self.latest_info and self.latest_info.github_release_notes:
+            content += f"# Neuestes GitHub-Release (v{self.latest_info.app_remote})\n\n{self.latest_info.github_release_notes}\n\n---\n\n"
+
+        candidates = [
+            os.path.join(get_source_dir(), "CHANGELOG.md"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md"),
+            os.path.expanduser("~/.local/share/recomp-center/CHANGELOG.md"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        content += f.read()
+                        return content
+                except Exception:
+                    pass
+
+        if content:
+            return content
+
+        return f"# Recomp Center v{recomp_center.__version__}\n\nKein lokales Changelog gefunden."
+
+    # --------------------------------------------------------------------------
+    # Tab 3: Terminal Output View
+    # --------------------------------------------------------------------------
+    def init_log_tab(self):
+        layout = QVBoxLayout(self.tab_log)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        log_header = QHBoxLayout()
+        lbl_out = QLabel("Live-Befehlsausgabe:")
+        lbl_out.setStyleSheet("font-weight: 600; font-size: 11px; color: #94a3b8;")
+        log_header.addWidget(lbl_out)
+        log_header.addStretch()
+
+        btn_clear = QPushButton("Log leeren")
+        btn_clear.setStyleSheet("""
+            QPushButton {
+                font-size: 10px;
+                padding: 3px 8px;
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                color: #cbd5e1;
+            }
+            QPushButton:hover { background: #334155; }
+        """)
+        btn_clear.clicked.connect(lambda: self.txt_log.clear())
+        log_header.addWidget(btn_clear)
+        layout.addLayout(log_header)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFont(QFont("JetBrains Mono, monospace", 9))
+        self.txt_log.setStyleSheet("""
+            QTextEdit {
+                background-color: #0c1220;
+                color: #e2e8f0;
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                padding: 8px;
+            }
+        """)
+        layout.addWidget(self.txt_log, stretch=1)
+
+    # --------------------------------------------------------------------------
+    # Worker Connection & Results
+    # --------------------------------------------------------------------------
+    def start_check(self):
+        self.btn_refresh.setEnabled(False)
+        self.btn_update_all.setEnabled(False)
+        self.progress_bar.setVisible(True)
+
+        self.badge_c1.setText("Prüfe...")
+        self.badge_c1.setStyleSheet("background-color: rgba(59, 130, 246, 0.15); color: #38bdf8; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+        self.lbl_c1_github.setText("Frage GitHub Releases API ab...")
+        self.lbl_status_summary.setText("Überprüfe Versionen und Build-Tools...")
+
+        self.checker_worker = UpdateCheckerWorker()
+        self.checker_worker.finished.connect(self.on_check_finished)
+        self.checker_worker.start()
+
+    def on_check_finished(self, info: UpdateInfo):
+        self.btn_refresh.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.latest_info = info
+
+        # 1. Update GUI Card
+        if info.github_auth_error:
+            self.lbl_c1_version.setText(f"Installiert: v{info.app_installed}  │  GitHub: Nicht abrufbar (Privat/404)")
+            self.lbl_c1_github.setText(f"GitHub: {info.github_error_message or 'Repository ist privat'}")
+            self.lbl_c1_github.setStyleSheet("color: #f87171; font-size: 11px;")
+            self.badge_c1.setText("⚠️ Token erforderlich")
+            self.badge_c1.setStyleSheet("background-color: rgba(239, 68, 68, 0.2); color: #f87171; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+            self.btn_link_github.setText("🔑 Token hinterlegen...")
+            self.btn_update_gui.setEnabled(False)
+        else:
+            self.lbl_c1_version.setText(f"Installiert: v{info.app_installed}  │  Verfügbar: v{info.app_remote}")
+            self.btn_link_github.setText("🔗 GitHub-Repo...")
+            if info.github_repo:
+                self.lbl_c1_github.setText(f"GitHub: {info.github_repo} (Releases aktiv)")
+                self.lbl_c1_github.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            else:
+                self.lbl_c1_github.setText("GitHub: Noch nicht verknüpft")
+                self.lbl_c1_github.setStyleSheet("color: #94a3b8; font-size: 11px;")
+
+            if info.app_has_update:
+                self.badge_c1.setText(f"⬆ Update verfügbar (v{info.app_remote})")
+                self.badge_c1.setStyleSheet("background-color: #ea580c; color: #ffffff; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+                self.btn_update_gui.setText("Jetzt aktualisieren")
+                self.btn_update_gui.setStyleSheet("""
+                    QPushButton {
+                        background-color: #ea580c;
+                        color: #ffffff;
+                        font-weight: 600;
+                        font-size: 11px;
+                        padding: 6px 14px;
+                        border-radius: 6px;
+                        border: none;
+                    }
+                    QPushButton:hover { background-color: #c2410c; }
+                """)
+                self.btn_update_gui.setEnabled(True)
+            else:
+                self.badge_c1.setText("✓ Aktuell")
+                self.badge_c1.setStyleSheet("background-color: rgba(16, 185, 129, 0.15); color: #10b981; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+                self.btn_update_gui.setText("Neu installieren")
+                self.btn_update_gui.setEnabled(True)
+
+        # 2. Update Build Tools Card
+        self.lbl_c2_status.setText(info.build_tools_details)
+        if info.build_tools_installed:
+            self.badge_c2.setText("✓ Bereit")
+            self.badge_c2.setStyleSheet("background-color: rgba(16, 185, 129, 0.15); color: #10b981; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+            self.btn_install_tools.setEnabled(False)
+            self.btn_install_tools.setText("Tools vorhanden")
+        else:
+            self.badge_c2.setText("⚠️ Fehlt")
+            self.badge_c2.setStyleSheet("background-color: rgba(234, 88, 12, 0.15); color: #ea580c; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-size: 11px;")
+            self.btn_install_tools.setEnabled(True)
+            self.btn_install_tools.setText("Tools installieren")
+
+        # 3. Update Catalog Card
+        self.badge_c3.setText(f"✓ {info.catalog_count} Titel")
+
+        # Enable "Update All" button if any update is pending
+        pending = info.total_updates_pending()
+        if pending > 0:
+            self.btn_update_all.setEnabled(True)
+            self.btn_update_all.setText(f"  🚀 Alle aktualisieren ({pending})")
+            self.lbl_status_summary.setText(f"{pending} Aktualisierung(en) verfügbar.")
+        else:
+            self.btn_update_all.setEnabled(False)
+            self.btn_update_all.setText("  ✓ Alles auf neuestem Stand")
+            self.lbl_status_summary.setText("Recomp Center und Komponenten sind auf dem neuesten Stand.")
+
+        # Refresh changelog tab markdown
+        self.txt_changelog.setMarkdown(self.load_changelog())
+
+        if info.check_error:
+            self.txt_log.append(f"[Hinweis] {info.check_error}\n")
+
+    # --------------------------------------------------------------------------
+    # Actions
+    # --------------------------------------------------------------------------
+    def configure_github_repo(self):
+        curr = get_github_repo() or ""
+        repo, ok = QInputDialog.getText(
+            self,
+            "GitHub-Repository verknüpfen",
+            "Gib das GitHub-Repository im Format 'Benutzername/Repository' ein:\n"
+            "(z. B. lenzi96/recomp-center oder vollständige URL):",
+            text=curr,
+        )
+        if ok and repo.strip():
+            set_github_repo(repo.strip())
+            curr_token = get_github_token() or ""
+            masked_token = (curr_token[:8] + "..." + curr_token[-4:]) if len(curr_token) > 12 else curr_token
+            tok, tok_ok = QInputDialog.getText(
+                self,
+                "GitHub Access Token (optional)",
+                "Gib dein GitHub Personal Access Token (PAT) ein\n"
+                "(Erforderlich für private Repositories, optional für öffentliche Repositories):\n"
+                f"Aktuell hinterlegt: {masked_token if masked_token else 'Keins'}",
+                text=curr_token,
+            )
+            if tok_ok and tok.strip():
+                set_github_token(tok.strip())
+            active_repo = get_github_repo()
+            QMessageBox.information(
+                self,
+                "GitHub verknüpft",
+                f"Das Update-Center ist jetzt mit GitHub verknüpft:\nhttps://github.com/{active_repo}\n\nUpdates werden künftig direkt von dort bezogen.",
+            )
+            self.start_check()
+
+    def reinstall_gui(self):
+        source_dir = get_source_dir()
+        installer = os.path.join(source_dir, "install.sh")
+
+        steps = []
+        if os.path.exists(installer) and os.path.isdir(os.path.join(source_dir, ".git")):
+            # In developer git repo: pull and reinstall
+            try:
+                res = subprocess.run(["git", "-C", source_dir, "remote"], capture_output=True, text=True, check=False)
+                if "origin" in res.stdout:
+                    steps.append(UpdateStep(
+                        "GitHub Quellcode synchronisieren (git pull)",
+                        ["git", "-C", source_dir, "pull", "--rebase"],
+                        "Aktualisiere lokale Dateien vom GitHub-Repository"
+                    ))
+            except Exception:
+                pass
+            steps.append(UpdateStep(
+                "Recomp Center Reinstallation",
+                ["bash", installer, "--user"],
+                "Installiere grafische Oberfläche neu",
+                is_app_update=True
+            ))
+        else:
+            # Standalone installation on any computer: download release tarball and install
+            ver = self.latest_info.app_remote if self.latest_info else recomp_center.__version__
+            asset_url = self.latest_info.github_asset_api_url if self.latest_info else ""
+            tarball_url = self.latest_info.github_tarball_url if self.latest_info else ""
+            updater_script = os.path.abspath(__file__)
+            tok = get_github_token()
+            cmd = [
+                sys.executable,
+                updater_script,
+                "--download-and-install",
+                "--version",
+                ver,
+                "--asset-url",
+                asset_url or "",
+                "--tarball-url",
+                tarball_url or "",
+            ]
+            if tok:
+                cmd.extend(["--token", tok])
+            steps.append(UpdateStep(
+                f"Recomp Center v{ver} herunterladen & installieren",
+                cmd,
+                "Lädt das offizielle GitHub Release-Archiv herunter und installiert die neue Version",
+                is_app_update=True,
+            ))
+
+        self.execute_batch_steps(steps)
+
+    def run_update_all(self):
+        if not self.latest_info:
+            return
+
+        steps: List[UpdateStep] = []
+
+        if self.latest_info.app_has_update:
+            source_dir = get_source_dir()
+            installer = os.path.join(source_dir, "install.sh")
+            if os.path.exists(installer) and os.path.isdir(os.path.join(source_dir, ".git")):
+                steps.append(UpdateStep(
+                    "GitHub Quellcode synchronisieren (git pull)",
+                    ["git", "-C", source_dir, "pull", "--rebase"],
+                    "Aktualisiere lokale Dateien vom GitHub-Repository"
+                ))
+                steps.append(UpdateStep(
+                    "Recomp Center Aktualisierung",
+                    ["bash", installer, "--user"],
+                    "Installiere neue Version",
+                    is_app_update=True
+                ))
+            else:
+                updater_script = os.path.abspath(__file__)
+                tok = get_github_token()
+                cmd = [
+                    sys.executable,
+                    updater_script,
+                    "--download-and-install",
+                    "--version",
+                    self.latest_info.app_remote,
+                    "--asset-url",
+                    self.latest_info.github_asset_api_url or "",
+                    "--tarball-url",
+                    self.latest_info.github_tarball_url or "",
+                ]
+                if tok:
+                    cmd.extend(["--token", tok])
+                steps.append(UpdateStep(
+                    f"Recomp Center v{self.latest_info.app_remote} herunterladen & installieren",
+                    cmd,
+                    "Lädt das offizielle GitHub Release-Archiv herunter und installiert die neue Version",
+                    is_app_update=True,
+                ))
+
+        if not steps:
+            QMessageBox.information(self, "Aktuell", "Es stehen keine ausstehenden Updates an.")
+            return
+
+        self.execute_batch_steps(steps)
+
+    def install_build_tools(self):
+        helper = "yay" if shutil.which("yay") else ("paru" if shutil.which("paru") else ("pacman" if shutil.which("pacman") else None))
+        if not helper:
+            QMessageBox.warning(self, "Paketmanager fehlt", "Weder pacman, yay noch paru gefunden.")
+            return
+
+        pkgs = ["base-devel", "cmake", "ninja", "git"]
+        if helper == "pacman":
+            cmd = ["pkexec", "pacman", "-S", "--needed", "--noconfirm"] + pkgs
+        else:
+            cmd = [helper, "-S", "--needed", "--noconfirm"] + pkgs
+
+        steps = [
+            UpdateStep(
+                "Build-Tools installieren (base-devel, cmake, ninja, git)",
+                cmd,
+                "Erforderliche Compiler- und Build-Werkzeuge für C/C++ Decomp-Ports installieren"
+            )
+        ]
+        self.execute_batch_steps(steps)
+
+    def execute_batch_steps(self, steps: List[UpdateStep]):
+        self.btn_refresh.setEnabled(False)
+        self.btn_update_all.setEnabled(False)
+        self.btn_cancel.setVisible(True)
+        self.progress_bar.setVisible(True)
+
+        # Switch to terminal tab so user can see live progress
+        self.tabs.setCurrentIndex(2)
+
+        self.batch_worker = BatchUpdateWorker(steps)
+        self.batch_worker.step_started.connect(self.on_step_started)
+        self.batch_worker.output_line.connect(self.on_log_line)
+        self.batch_worker.all_completed.connect(self.on_batch_completed)
+        self.batch_worker.start()
+
+    def cancel_active_process(self):
+        if self.batch_worker:
+            self.batch_worker.cancel()
+            self.btn_cancel.setEnabled(False)
+
+    def on_step_started(self, current: int, total: int, title: str):
+        self.lbl_status_summary.setText(f"Führe aus ({current}/{total}): {title}...")
+
+    def on_log_line(self, line: str):
+        cursor = self.txt_log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(line + "\n")
+        self.txt_log.setTextCursor(cursor)
+        self.txt_log.ensureCursorVisible()
+
+    def on_batch_completed(self, success: bool, message: str, app_was_updated: bool):
+        self.progress_bar.setVisible(False)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
+
+        self.lbl_status_summary.setText(message)
+
+        if success:
+            self.txt_log.append(f"\n[✓] {message}\n")
+            if app_was_updated:
+                reply = QMessageBox.question(
+                    self,
+                    "Update abgeschlossen – Neustart?",
+                    "Das Recomp Center wurde erfolgreich aktualisiert!\n\n"
+                    "Möchten Sie die Anwendung jetzt neu starten, um die Änderungen zu übernehmen?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.restart_application()
+            else:
+                QMessageBox.information(self, "Erfolg", message)
+        else:
+            self.txt_log.append(f"\n[✗] {message}\n")
+            QMessageBox.warning(self, "Hinweis", f"{message}\n\nDetails finden Sie im Terminal-Ausgabe-Reiter.")
+
+        self.start_check()
+
+    def restart_application(self):
+        """Cleanly restarts Recomp Center."""
+        launcher = shutil.which("recomp-center") or sys.executable
+        if launcher == sys.executable:
+            QProcess.startDetached(sys.executable, sys.argv)
+        else:
+            QProcess.startDetached(launcher, [])
+        QApplication.quit()
+
+
+# ------------------------------------------------------------------------------
+# Standalone Downloader & Release Installer
+# ------------------------------------------------------------------------------
+def download_and_install_release(version: str = "", asset_url: str = "", tarball_url: str = "", token: str = "") -> int:
+    """
+    Downloads GitHub release tarball, extracts it to /tmp, and executes install.sh --user.
+    Supports both public repositories and private repositories with personal access token.
+    """
+    repo = get_github_repo() or DEFAULT_GITHUB_REPO
+    token = token.strip() if token else (get_github_token() or "")
+
+    # If token present, query live release asset URL
+    if token:
+        try:
+            tag_slug = f"tags/v{version}" if version and not version.startswith("v") else (f"tags/{version}" if version else "latest")
+            api_rel = f"https://api.github.com/repos/{repo}/releases/{tag_slug}"
+            req = urllib.request.Request(api_rel, headers={
+                "User-Agent": "recomp-center",
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json"
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                version = data.get("tag_name", "").lstrip("v").strip() or version
+                for asset in data.get("assets", []):
+                    if asset.get("name", "").endswith((".tar.gz", ".zip", ".tar.xz")):
+                        asset_url = asset.get("url", "")
+                        tarball_url = asset.get("browser_download_url", "")
+                        break
+        except Exception:
+            pass
+
+    if not version:
+        try:
+            gh_url = f"https://api.github.com/repos/{repo}/releases/latest"
+            headers = {"User-Agent": "recomp-center", "Accept": "application/vnd.github+json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(gh_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                version = data.get("tag_name", "").lstrip("v").strip()
+                for asset in data.get("assets", []):
+                    if asset.get("name", "").endswith((".tar.gz", ".zip", ".tar.xz")):
+                        tarball_url = asset.get("browser_download_url", "")
+                        asset_url = asset.get("url", "")
+                        break
+        except Exception as e:
+            print(f"[FEHLER] Konnte Release-Informationen von GitHub nicht abrufen: {e}")
+            return 1
+
+    print("=======================================================")
+    print("     Recomp Center – Automatischer Release-Updater     ")
+    print("=======================================================")
+    print(f"Ziel-Version : v{version}")
+    print(f"Repository   : {repo}")
+    print(f"Token aktiv  : {'Ja' if token else 'Nein (Öffentliches Repo)'}")
+    print("-------------------------------------------------------")
+
+    tmp_dir = tempfile.mkdtemp(prefix="recomp_center_update_")
+    tar_path = os.path.join(tmp_dir, f"recomp-center-v{version}.tar.gz")
+    unpack_dir = os.path.join(tmp_dir, "unpacked")
+
+    try:
+        download_url = asset_url if (token and asset_url) else tarball_url
+        if not download_url:
+            download_url = f"https://github.com/{repo}/releases/download/v{version}/recomp-center-v{version}.tar.gz"
+
+        print("[1/4] Lade Release-Paket herunter...")
+        curl_bin = shutil.which("curl")
+        download_ok = False
+
+        if curl_bin:
+            curl_cmd = [curl_bin, "-sSL", "-f"]
+            if token:
+                curl_cmd.extend(["-H", f"Authorization: Bearer {token}"])
+            curl_cmd.extend(["-H", "Accept: application/octet-stream", download_url, "-o", tar_path])
+            res = subprocess.run(curl_cmd, check=False)
+            if res.returncode == 0 and os.path.exists(tar_path) and os.path.getsize(tar_path) > 1000:
+                download_ok = True
+
+        if not download_ok:
+            class NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+                    if new_req and "Authorization" in new_req.headers:
+                        del new_req.headers["Authorization"]
+                    return new_req
+
+            opener = urllib.request.build_opener(NoAuthRedirect)
+            headers = {"User-Agent": "Recomp-Center"}
+            if token and "api.github.com" in download_url:
+                headers["Authorization"] = f"Bearer {token}"
+                headers["Accept"] = "application/octet-stream"
+            req = urllib.request.Request(download_url, headers=headers)
+            try:
+                with opener.open(req, timeout=30) as resp, open(tar_path, "wb") as out_f:
+                    shutil.copyfileobj(resp, out_f)
+                if os.path.exists(tar_path) and os.path.getsize(tar_path) > 1000:
+                    download_ok = True
+            except Exception as e:
+                print(f"[Hinweis] urllib Download: {e}")
+
+        if not download_ok:
+            print("[FEHLER] Herunterladen des Release-Archivs fehlgeschlagen.")
+            return 1
+
+        size_mb = os.path.getsize(tar_path) / (1024 * 1024)
+        print(f"✓ Download erfolgreich ({size_mb:.2f} MB)")
+
+        print("[2/4] Entpacke Archiv...")
+        os.makedirs(unpack_dir, exist_ok=True)
+        res_tar = subprocess.run(["tar", "-xzf", tar_path, "-C", unpack_dir], check=False)
+        if res_tar.returncode != 0:
+            print("[FEHLER] Archiv konnte nicht entpackt werden.")
+            return 1
+        print("✓ Entpacken abgeschlossen.")
+
+        # Find install.sh inside unpacked folder
+        installer_path = None
+        for root, dirs, files in os.walk(unpack_dir):
+            if "install.sh" in files:
+                installer_path = os.path.join(root, "install.sh")
+                break
+
+        if not installer_path:
+            print("[FEHLER] install.sh im entpackten Release-Archiv nicht gefunden.")
+            return 1
+
+        print(f"[3/4] Führe Installation aus ({installer_path} --user)...")
+        os.chmod(installer_path, 0o755)
+        res_inst = subprocess.run(["bash", installer_path, "--user"], check=False)
+        if res_inst.returncode != 0:
+            print(f"[FEHLER] Installation schlug fehl mit Exit-Code {res_inst.returncode}")
+            return res_inst.returncode
+
+        print("[4/4] Bereinige temporäre Dateien...")
+        print(f"✓ Recomp Center wurde erfolgreich auf v{version} aktualisiert!")
+        return 0
+
+    finally:
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    if any(arg in sys.argv for arg in ("--download-and-install", "-h", "--help")):
+        parser = argparse.ArgumentParser(description="Recomp Center Standalone Release Installer")
+        parser.add_argument("--download-and-install", action="store_true")
+        parser.add_argument("--version", default="")
+        parser.add_argument("--asset-url", default="")
+        parser.add_argument("--tarball-url", default="")
+        parser.add_argument("--token", default="")
+        args, _ = parser.parse_known_args()
+        if args.download_and_install:
+            sys.exit(download_and_install_release(args.version, args.asset_url, args.tarball_url, args.token))
+    else:
+        # Launch standalone dialog test
+        app = QApplication(sys.argv)
+        dlg = UpdateDialog()
+        dlg.show()
+        sys.exit(app.exec())
