@@ -1,7 +1,56 @@
 #!/usr/bin/env bash
-# Recomp Center launcher script
+# ==============================================================================
+# Recomp Center - Universal Launcher Script
+# ==============================================================================
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 1. Resolve application directory (supports running from git repo, ~/.local, or /usr)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -f "${SCRIPT_DIR}/main.py" ]; then
+    # Running directly from source/repo directory
+    APP_DIR="${SCRIPT_DIR}"
+elif [ -f "${HOME}/.local/share/recomp-center/app/main.py" ]; then
+    # Running from user installation
+    APP_DIR="${HOME}/.local/share/recomp-center/app"
+elif [ -f "/usr/share/recomp-center/app/main.py" ]; then
+    # Running from system installation
+    APP_DIR="/usr/share/recomp-center/app"
+elif [ -f "/usr/share/recomp-center/main.py" ]; then
+    APP_DIR="/usr/share/recomp-center"
+elif [ -f "/usr/local/share/recomp-center/main.py" ]; then
+    APP_DIR="/usr/local/share/recomp-center"
+else
+    echo "=====================================================================" >&2
+    echo " [FEHLER] Recomp Center Anwendungsdateien (main.py) nicht gefunden!" >&2
+    echo "=====================================================================" >&2
+    echo "Gesucht in:" >&2
+    echo "  • ${SCRIPT_DIR}/main.py" >&2
+    echo "  • ${HOME}/.local/share/recomp-center/app/main.py" >&2
+    echo "" >&2
+    echo "Bitte führe './install.sh' oder './install-gui.sh' aus." >&2
+    exit 1
+fi
+
 export PYTHONPATH="${APP_DIR}:${PYTHONPATH}"
+
+# 2. Check if python3 is available
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[FEHLER] python3 ist nicht auf diesem System installiert!" >&2
+    exit 1
+fi
+
+# 3. Check for PyQt6 before launching
+if ! python3 -c "import PyQt6" >/dev/null 2>&1; then
+    ERR_MSG="Recomp Center benötigt PyQt6, das auf diesem System fehlt.\n\nInstallation:\n  • Arch / CachyOS:  sudo pacman -S python-pyqt6\n  • Ubuntu / Debian: sudo apt install python3-pyqt6\n  • Fedora:          sudo dnf install python3-pyqt6\n  • openSUSE:        sudo zypper in python3-qt6\n  • PIP:             pip install PyQt6"
+    echo -e "\033[1;31m[FEHLER]\033[0m ${ERR_MSG}" >&2
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="Recomp Center - PyQt6 fehlt" --text="${ERR_MSG}" 2>/dev/null || true
+    elif command -v kdialog >/dev/null 2>&1; then
+        kdialog --error "${ERR_MSG}" --title "Recomp Center - PyQt6 fehlt" 2>/dev/null || true
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical "Recomp Center" "PyQt6 fehlt! Bitte 'python-pyqt6' installieren." 2>/dev/null || true
+    fi
+    exit 1
+fi
 
 exec python3 "${APP_DIR}/main.py" "$@"

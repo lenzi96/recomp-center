@@ -45,16 +45,15 @@ class LibraryManager:
         """Autodetects likely ROM locations on user system."""
         import glob
         candidates = [
-            "/run/media/julian/HDD/Downloads/N64/Games",
-            "/run/media/julian/HDD/Downloads/N64",
             os.path.expanduser("~/ROMs"),
             os.path.expanduser("~/roms"),
             os.path.expanduser("~/Emulation/roms"),
             os.path.expanduser("~/Games/ROMs"),
             os.path.expanduser("~/Downloads"),
         ]
-        # Also check /run/media mounts dynamically
-        for base in glob.glob("/run/media/*/*"):
+        # Check /run/media, /media, and /mnt mounts dynamically
+        mount_bases = glob.glob("/run/media/*/*") + glob.glob("/media/*/*") + glob.glob("/mnt/*")
+        for base in mount_bases:
             for sub in ["Downloads/N64/Games", "Downloads/N64", "ROMs", "roms", "Emulation/roms"]:
                 candidates.append(os.path.join(base, sub))
 

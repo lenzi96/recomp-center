@@ -554,8 +554,6 @@ class RomAutoMatcher:
         """Returns detected potential ROM directories on user system."""
         found = set()
         std_dirs = [
-            "/run/media/julian/HDD/Downloads/N64/Games",
-            "/run/media/julian/HDD/Downloads/N64",
             os.path.expanduser("~/ROMs"),
             os.path.expanduser("~/roms"),
             os.path.expanduser("~/Emulation/roms"),
@@ -566,7 +564,8 @@ class RomAutoMatcher:
             if os.path.exists(p):
                 found.add(p)
 
-        for base in glob.glob("/run/media/*/*"):
+        mount_bases = glob.glob("/run/media/*/*") + glob.glob("/media/*/*") + glob.glob("/mnt/*")
+        for base in mount_bases:
             for sub in ["Downloads/N64/Games", "Downloads/N64", "ROMs", "roms", "Emulation/roms", "GC", "PS2", "PSX", "Wii"]:
                 target = os.path.join(base, sub)
                 if os.path.exists(target):

@@ -238,14 +238,17 @@ class InstallWorker(QThread):
 
             self.progress.emit(88, "Registriere Desktop-Menüeintrag...")
             desktop_file = app_dir / "recomp-center.desktop"
-            shutil.copy(REPO_DIR / "recomp-center.desktop", desktop_file)
+            raw_desktop = (REPO_DIR / "recomp-center.desktop").read_text(encoding="utf-8")
+            robust_exec = f"Exec=sh -c 'if [ -x \"{bin_dir}/recomp-center\" ]; then exec \"{bin_dir}/recomp-center\" \"$@\"; else exec recomp-center \"$@\"; fi' -- %u"
+            robust_desktop = re.sub(r"^Exec=.*", robust_exec, raw_desktop, flags=re.MULTILINE)
+            desktop_file.write_text(robust_desktop, encoding="utf-8")
             desktop_file.chmod(0o644)
 
             if self.make_desktop_shortcut:
                 for dt_candidate in [home / "Schreibtisch", home / "Desktop"]:
                     if dt_candidate.exists():
                         target_dt = dt_candidate / "recomp-center.desktop"
-                        shutil.copy(REPO_DIR / "recomp-center.desktop", target_dt)
+                        target_dt.write_text(robust_desktop, encoding="utf-8")
                         target_dt.chmod(0o755)
             time.sleep(0.2)
 
@@ -482,12 +485,19 @@ class InstallerWindow(QMainWindow):
         return w
 
     def _detect_default_rom(self) -> str:
+        try:
+            from recomp_center.core.rom_scanner import RomAutoMatcher
+            dirs = RomAutoMatcher.get_candidate_rom_dirs()
+            if dirs:
+                return dirs[0]
+        except Exception:
+            pass
+
         candidates = [
-            "/run/media/julian/HDD/Downloads/N64/Games",
-            "/run/media/julian/HDD/Downloads/N64",
             str(Path.home() / "ROMs"),
             str(Path.home() / "roms"),
             str(Path.home() / "Emulation" / "roms"),
+            str(Path.home() / "Games" / "ROMs"),
             str(Path.home() / "Downloads"),
         ]
         for c in candidates:
