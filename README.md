@@ -37,12 +37,19 @@ cd recomp-center
 python3 main.py
 ```
 
-### Systemweite Benutzerinstallation
+### 🖥️ Grafischer Installations-Assistent (Empfohlen)
 ```bash
-cd recomp-center
+./install-gui.sh
+# oder:
+python3 installer_gui.py
+```
+Öffnet einen interaktiven 4-Schritte Setup-Assistenten mit System-Voraussetzungsprüfung, automatischer ROM-Verzeichnis-Erkennung und Desktop-Integration.
+
+### ⚡ Schnelle Terminal-Installation
+```bash
 ./install.sh
 ```
-Installiert den Starter nach `~/.local/bin/recomp-center` und legt das Desktop-Icon im Anwendungsmenü an.
+Installiert Recomp Center nach `~/.local/share/recomp-center/app`, verlinkt den Starter nach `~/.local/bin/recomp-center` und richtet das Anwendungsmenü sowie Schreibtisch-Icon ein.
 
 ### Deinstallation
 ```bash
