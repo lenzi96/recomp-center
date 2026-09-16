@@ -311,10 +311,31 @@ class UpdateCheckerWorker(QThread):
                                     info.github_asset_api_url = asset.get("url", "")
                                     break
             except urllib.error.HTTPError as err:
-                if err.code in (401, 403, 404):
+                if err.code == 404:
+                    # 404 on releases/latest occurs when a repository has 0 releases published yet
+                    try:
+                        repo_check_req = urllib.request.Request(
+                            f"https://api.github.com/repos/{gh_repo}",
+                            headers=headers
+                        )
+                        with urllib.request.urlopen(repo_check_req, timeout=5) as repo_resp:
+                            if repo_resp.status == 200:
+                                info.github_auth_error = False
+                                info.app_remote = info.app_installed
+                                info.github_error_message = None
+                            else:
+                                info.github_auth_error = True
+                                info.github_error_message = "Repository existiert nicht oder ist privat."
+                    except Exception:
+                        info.github_auth_error = True
+                        if not gh_token:
+                            info.github_error_message = "Repository ist privat oder existiert noch nicht. Bitte GitHub-Token hinterlegen."
+                        else:
+                            info.github_error_message = "GitHub-Fehler 404: Repository nicht gefunden."
+                elif err.code in (401, 403):
                     info.github_auth_error = True
                     if not gh_token:
-                        info.github_error_message = "Repository ist privat oder existiert noch nicht. Bitte GitHub-Token hinterlegen oder Repo öffentlich machen."
+                        info.github_error_message = "Repository ist privat. Bitte GitHub-Token hinterlegen."
                     else:
                         info.github_error_message = f"GitHub-Fehler {err.code}: Token ungültig oder unzureichende Leserechte."
                 else:
