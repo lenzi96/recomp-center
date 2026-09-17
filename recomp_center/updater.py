@@ -411,6 +411,28 @@ class BatchUpdateWorker(QThread):
             else:
                 env["PYTHONPATH"] = source_dir
 
+            # Set up GUI askpass for sudo if needed
+            if step.command and ("sudo" in step.command or step.command[0] == "sudo"):
+                if "SUDO_ASKPASS" not in env:
+                    if shutil.which("kdialog"):
+                        askpass_bin = "/tmp/recomp_askpass.sh"
+                        try:
+                            with open(askpass_bin, "w") as f:
+                                f.write("#!/bin/sh\nkdialog --password 'Recomp Center Administrator-Passwort:'\n")
+                            os.chmod(askpass_bin, 0o755)
+                            env["SUDO_ASKPASS"] = askpass_bin
+                        except Exception:
+                            pass
+                    elif shutil.which("zenity"):
+                        askpass_bin = "/tmp/recomp_askpass.sh"
+                        try:
+                            with open(askpass_bin, "w") as f:
+                                f.write("#!/bin/sh\nzenity --password --title='Recomp Center: Root-Passwort'\n")
+                            os.chmod(askpass_bin, 0o755)
+                            env["SUDO_ASKPASS"] = askpass_bin
+                        except Exception:
+                            pass
+
             try:
                 self.process = subprocess.Popen(
                     step.command,
@@ -436,6 +458,10 @@ class BatchUpdateWorker(QThread):
                     all_success = False
                     failed_steps.append(step.name)
                     self.output_line.emit(f"\n[✗] Schritt '{step.name}' mit Statuscode {ret} beendet.")
+                    if step.command and step.command[0] in ["pkexec", "sudo"]:
+                        raw_cmd = " ".join([c for c in step.command if c not in ["pkexec", "sudo", "-A"]])
+                        self.output_line.emit("\n[Hinweis] Das Installieren von System-Paketen erfordert Administrator-Rechte.")
+                        self.output_line.emit(f"[Tipp] Du kannst die Tools alternativ direkt im Terminal installieren mit:\n       sudo {raw_cmd}\n")
                 else:
                     self.output_line.emit(f"\n[✓] Schritt '{step.name}' erfolgreich abgeschlossen.")
                     if step.is_app_update:
@@ -1179,20 +1205,64 @@ class UpdateDialog(QDialog):
         self.execute_batch_steps(steps)
 
     def install_build_tools(self):
-        helper = "yay" if shutil.which("yay") else ("paru" if shutil.which("paru") else ("pacman" if shutil.which("pacman") else None))
-        if not helper:
-            QMessageBox.warning(self, "Paketmanager fehlt", "Weder pacman, yay noch paru gefunden.")
-            return
+        cmd = None
+        distro_name = "Linux"
+        pkgs_str = ""
 
-        pkgs = ["base-devel", "cmake", "ninja", "git"]
-        if helper == "pacman":
-            cmd = ["pkexec", "pacman", "-S", "--needed", "--noconfirm"] + pkgs
-        else:
-            cmd = [helper, "-S", "--needed", "--noconfirm"] + pkgs
+        # Check native distro package manager
+        if shutil.which("pacman"):
+            distro_name = "Arch / CachyOS"
+            pkgs = ["base-devel", "cmake", "ninja", "git"]
+            pkgs_str = " ".join(pkgs)
+            if shutil.which("pkexec"):
+                cmd = ["pkexec", "pacman", "-S", "--needed", "--noconfirm"] + pkgs
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "-A", "pacman", "-S", "--needed", "--noconfirm"] + pkgs
+            else:
+                cmd = ["pacman", "-S", "--needed", "--noconfirm"] + pkgs
+        elif shutil.which("apt-get"):
+            distro_name = "Ubuntu / Debian"
+            pkgs = ["build-essential", "cmake", "ninja-build", "git"]
+            pkgs_str = " ".join(pkgs)
+            if shutil.which("pkexec"):
+                cmd = ["pkexec", "apt-get", "install", "-y"] + pkgs
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "-A", "apt-get", "install", "-y"] + pkgs
+            else:
+                cmd = ["apt-get", "install", "-y"] + pkgs
+        elif shutil.which("dnf"):
+            distro_name = "Fedora"
+            pkgs = ["@development-tools", "cmake", "ninja-build", "git"]
+            pkgs_str = " ".join(pkgs)
+            if shutil.which("pkexec"):
+                cmd = ["pkexec", "dnf", "install", "-y"] + pkgs
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "-A", "dnf", "install", "-y"] + pkgs
+            else:
+                cmd = ["dnf", "install", "-y"] + pkgs
+        elif shutil.which("zypper"):
+            distro_name = "openSUSE"
+            pkgs = ["-t", "pattern", "devel_basis", "cmake", "ninja", "git"]
+            pkgs_str = " ".join(pkgs)
+            if shutil.which("pkexec"):
+                cmd = ["pkexec", "zypper", "in", "-y"] + pkgs
+            elif shutil.which("sudo"):
+                cmd = ["sudo", "-A", "zypper", "in", "-y"] + pkgs
+            else:
+                cmd = ["zypper", "in", "-y"] + pkgs
+
+        if not cmd:
+            QMessageBox.warning(
+                self,
+                "Paketmanager nicht gefunden",
+                "Weder pacman, apt, dnf noch zypper gefunden.\n"
+                "Bitte installiere gcc/g++, make, cmake, ninja und git manuell."
+            )
+            return
 
         steps = [
             UpdateStep(
-                "Build-Tools installieren (base-devel, cmake, ninja, git)",
+                f"Build-Tools installieren ({distro_name}: {pkgs_str})",
                 cmd,
                 "Erforderliche Compiler- und Build-Werkzeuge für C/C++ Decomp-Ports installieren"
             )
