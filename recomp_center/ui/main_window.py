@@ -65,17 +65,25 @@ class MainWindow(QMainWindow):
 
         # Brand / Logo
         brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
+        brand_row.setSpacing(12)
         logo_lbl = QLabel("⚡")
-        logo_lbl.setStyleSheet("font-size: 26px; color: #38bdf8;")
+        logo_lbl.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0284c7, stop:1 #0369a1);
+            border: 1px solid #38bdf8;
+            border-radius: 10px;
+            font-size: 22px;
+            padding: 4px;
+        """)
+        logo_lbl.setFixedSize(40, 40)
+        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_row.addWidget(logo_lbl)
 
         brand_text = QVBoxLayout()
         brand_text.setSpacing(0)
         app_name = QLabel("RECOMP")
-        app_name.setStyleSheet("font-size: 17px; font-weight: 900; letter-spacing: 1px; color: #f8fafc;")
+        app_name.setStyleSheet("font-size: 17px; font-weight: 900; letter-spacing: 1.5px; color: #ffffff;")
         app_sub = QLabel("CENTER")
-        app_sub.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #38bdf8;")
+        app_sub.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 2px; color: #38bdf8;")
         brand_text.addWidget(app_name)
         brand_text.addWidget(app_sub)
         brand_row.addLayout(brand_text)
@@ -86,7 +94,7 @@ class MainWindow(QMainWindow):
 
         # Section Label
         menu_lbl = QLabel("NAVIGATION")
-        menu_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #64748b; letter-spacing: 1px; padding-left: 6px;")
+        menu_lbl.setStyleSheet("font-size: 10px; font-weight: 800; color: #475569; letter-spacing: 1.5px; padding-left: 6px;")
         side_layout.addWidget(menu_lbl)
 
         # Nav Buttons
@@ -102,24 +110,41 @@ class MainWindow(QMainWindow):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setProperty("class", "nav-btn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(handler)
             side_layout.addWidget(btn)
             self.nav_buttons[nav_id] = btn
 
         side_layout.addStretch(1)
 
-        # Status footer in sidebar
-        inst_count = len(self.library_mgr.installed_games)
-        self.side_status = QLabel(f"Installiert: {inst_count} Spiele")
-        self.side_status.setStyleSheet("font-size: 11px; color: #64748b; padding-left: 6px;")
-        side_layout.addWidget(self.side_status)
+        # Status footer card in sidebar
+        footer_card = QFrame()
+        footer_card.setStyleSheet("""
+            QFrame {
+                background-color: #111726;
+                border: 1px solid #1e293b;
+                border-radius: 10px;
+                padding: 10px;
+            }
+        """)
+        f_layout = QVBoxLayout(footer_card)
+        f_layout.setContentsMargins(8, 8, 8, 8)
+        f_layout.setSpacing(4)
+
+        foot_lbl = QLabel("SYSTEM STATUS")
+        foot_lbl.setStyleSheet("font-size: 9px; font-weight: 800; color: #475569; letter-spacing: 1px;")
+        f_layout.addWidget(foot_lbl)
+
+        self.side_status = QLabel("Lade Status...")
+        self.side_status.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 600;")
+        f_layout.addWidget(self.side_status)
 
         self.btn_check_updates = QPushButton("Auf Updates prüfen...")
         self.btn_check_updates.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_check_updates.setStyleSheet("""
             QPushButton {
-                background: rgba(255, 255, 255, 0.06);
-                color: #e2e8f0;
+                background: rgba(255, 255, 255, 0.05);
+                color: #cbd5e1;
                 font-size: 11px;
                 font-weight: 600;
                 border: 1px solid #334155;
@@ -134,8 +159,9 @@ class MainWindow(QMainWindow):
             }
         """)
         self.btn_check_updates.clicked.connect(self.show_update_dialog)
-        side_layout.addWidget(self.btn_check_updates)
+        f_layout.addWidget(self.btn_check_updates)
 
+        side_layout.addWidget(footer_card)
         root_layout.addWidget(sidebar)
 
         # -------------------------------------------------------------
@@ -173,6 +199,36 @@ class MainWindow(QMainWindow):
         # Default to Explore view
         self._set_active_nav("explore")
         self.stack.setCurrentIndex(0)
+        self._update_sidebar_badges()
+
+    def _update_sidebar_badges(self):
+        """Refreshes sidebar badges, installed count, active downloads, and disk storage."""
+        inst_count = len(self.library_mgr.installed_games)
+        if "library" in self.nav_buttons:
+            self.nav_buttons["library"].setText(f"🎮  Bibliothek  ({inst_count})")
+        if "downloads" in self.nav_buttons:
+            if self.active_download_worker and self.active_download_worker.isRunning():
+                self.nav_buttons["downloads"].setText("📥  Downloads  (1 aktiv)")
+            else:
+                self.nav_buttons["downloads"].setText("📥  Downloads")
+
+        # Calculate disk storage used
+        total_bytes = 0
+        for game in self.library_mgr.installed_games.values():
+            if game.install_path and os.path.exists(game.install_path):
+                for root, dirs, files in os.walk(game.install_path):
+                    for f in files:
+                        try:
+                            total_bytes += os.path.getsize(os.path.join(root, f))
+                        except Exception:
+                            pass
+        if total_bytes > 1024 * 1024 * 1024:
+            size_str = f"{total_bytes / (1024*1024*1024):.1f} GB"
+        elif total_bytes > 1024 * 1024:
+            size_str = f"{total_bytes / (1024*1024):.1f} MB"
+        else:
+            size_str = f"{total_bytes / 1024:.0f} KB"
+        self.side_status.setText(f"🎮 {inst_count} Spiele • 💾 {size_str}")
 
     # -------------------------------------------------------------
     # Navigation Handlers
@@ -184,19 +240,23 @@ class MainWindow(QMainWindow):
     def _show_explore(self):
         self._set_active_nav("explore")
         self.explore_view.refresh_cards()
+        self._update_sidebar_badges()
         self.stack.setCurrentWidget(self.explore_view)
 
     def _show_library(self):
         self._set_active_nav("library")
         self.library_view.refresh_library()
+        self._update_sidebar_badges()
         self.stack.setCurrentWidget(self.library_view)
 
     def _show_downloads(self):
         self._set_active_nav("downloads")
+        self._update_sidebar_badges()
         self.stack.setCurrentWidget(self.downloads_view)
 
     def _show_settings(self):
         self._set_active_nav("settings")
+        self._update_sidebar_badges()
         self.stack.setCurrentWidget(self.settings_view)
 
     def _show_project_detail(self, project_id: str):
@@ -224,7 +284,7 @@ class MainWindow(QMainWindow):
 
         self.library_view.refresh_library()
         self.explore_view.refresh_cards()
-        self.side_status.setText(f"Installiert: {len(self.library_mgr.installed_games)} Spiele")
+        self._update_sidebar_badges()
 
     # -------------------------------------------------------------
     # Download & Installation Pipeline
@@ -266,6 +326,7 @@ class MainWindow(QMainWindow):
         self.active_download_worker.finished.connect(self._on_download_finished)
         self.active_download_worker.error.connect(self._on_download_error)
         self.active_download_worker.start()
+        self._update_sidebar_badges()
 
     def _cancel_download(self):
         if self.active_download_worker:
@@ -275,6 +336,7 @@ class MainWindow(QMainWindow):
                 False,
                 "Vom Nutzer abgebrochen."
             )
+            self._update_sidebar_badges()
 
     def _on_download_finished(self, archive_path: str):
         proj = self.current_downloading_proj
@@ -315,7 +377,9 @@ class MainWindow(QMainWindow):
                 self.library_mgr.create_desktop_entry(proj)
 
             self.downloads_view.mark_finished(proj.name, True, f"Installiert nach: {target_game_dir}")
-            self.side_status.setText(f"Installiert: {len(self.library_mgr.installed_games)} Spiele")
+            self.explore_view.refresh_cards()
+            self.library_view.refresh_library()
+            self._update_sidebar_badges()
 
             # Check if assets are needed and notify user
             if proj.required_files:
@@ -331,11 +395,13 @@ class MainWindow(QMainWindow):
                 )
         else:
             self.downloads_view.mark_finished(proj.name, False, f"Extraktionsfehler: {err}")
+            self._update_sidebar_badges()
             QMessageBox.critical(self, "Installationsfehler", f"Konnte {proj.name} nicht extrahieren: {err}")
 
     def _on_download_error(self, err_msg: str):
         proj_name = self.current_downloading_proj.name if self.current_downloading_proj else "Spiel"
         self.downloads_view.mark_finished(proj_name, False, err_msg)
+        self._update_sidebar_badges()
         QMessageBox.critical(self, "Download-Fehler", err_msg)
 
     # -------------------------------------------------------------

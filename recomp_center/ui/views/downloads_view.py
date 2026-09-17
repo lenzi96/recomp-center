@@ -1,4 +1,4 @@
-"""Downloads and active installation progress view."""
+"""Downloads and active installation progress view with modern styling."""
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -23,7 +23,7 @@ class DownloadsView(QWidget):
         # Header Title
         title_box = QVBoxLayout()
         title = QLabel("Downloads & Installationen")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #f8fafc;")
+        title.setStyleSheet("font-size: 24px; font-weight: 900; color: #ffffff; letter-spacing: 0.3px;")
         title_box.addWidget(title)
 
         self.subtitle = QLabel("Aktive Downloads und Installationsverlauf.")
@@ -33,17 +33,25 @@ class DownloadsView(QWidget):
 
         # Active Download Card
         self.active_frame = QFrame()
-        self.active_frame.setStyleSheet("background-color: #131b2e; border: 1px solid #1e293b; border-radius: 12px; padding: 18px;")
+        self.active_frame.setStyleSheet("""
+            QFrame {
+                background-color: #111726;
+                border: 1px solid #1e293b;
+                border-radius: 12px;
+                padding: 18px;
+            }
+        """)
         active_layout = QVBoxLayout(self.active_frame)
         active_layout.setSpacing(12)
 
         active_title_row = QHBoxLayout()
         self.active_game_lbl = QLabel("Kein aktiver Download")
-        self.active_game_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #f8fafc;")
+        self.active_game_lbl.setStyleSheet("font-size: 16px; font-weight: 800; color: #ffffff;")
         active_title_row.addWidget(self.active_game_lbl, 1)
 
         self.cancel_btn = QPushButton("Abbrechen")
         self.cancel_btn.setProperty("class", "danger-btn")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.cancel_requested.emit)
         self.cancel_btn.setVisible(False)
         active_title_row.addWidget(self.cancel_btn)
@@ -61,10 +69,21 @@ class DownloadsView(QWidget):
 
         layout.addWidget(self.active_frame)
 
-        # History Header
+        # History Header Row
+        hist_header = QHBoxLayout()
         hist_lbl = QLabel("Verlauf")
-        hist_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #cbd5e1; margin-top: 10px;")
-        layout.addWidget(hist_lbl)
+        hist_lbl.setStyleSheet("font-size: 16px; font-weight: 800; color: #f8fafc;")
+        hist_header.addWidget(hist_lbl)
+
+        hist_header.addStretch(1)
+
+        self.btn_clear_hist = QPushButton("Verlauf leeren")
+        self.btn_clear_hist.setProperty("class", "secondary-btn")
+        self.btn_clear_hist.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_hist.clicked.connect(self._clear_history)
+        hist_header.addWidget(self.btn_clear_hist)
+
+        layout.addLayout(hist_header)
 
         # History List
         scroll = QScrollArea()
@@ -112,10 +131,24 @@ class DownloadsView(QWidget):
 
         # Add to history
         row = QFrame()
-        row.setStyleSheet("background-color: #131b2e; border-radius: 8px; padding: 8px 12px;")
+        row.setStyleSheet("""
+            QFrame {
+                background-color: #111726;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 10px 14px;
+            }
+        """)
         r_layout = QHBoxLayout(row)
         icon = "✅" if success else "❌"
-        lbl = QLabel(f"{icon} <b>{game_name}</b> - {msg or ('Erfolgreich installiert' if success else 'Fehlgeschlagen')}")
+        lbl = QLabel(f"{icon} <b>{game_name}</b> — {msg or ('Erfolgreich installiert' if success else 'Fehlgeschlagen')}")
         lbl.setStyleSheet("font-size: 12px; color: #cbd5e1;")
         r_layout.addWidget(lbl)
         self.history_layout.insertWidget(0, row)
+
+    def _clear_history(self):
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+

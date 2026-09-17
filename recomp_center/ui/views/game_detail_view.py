@@ -116,47 +116,31 @@ class GameDetailView(QWidget):
 
         self.primary_action_btn = QPushButton("Lade Release-Info...")
         self.primary_action_btn.setEnabled(False)
-        self.primary_action_btn.setMinimumWidth(160)
+        self.primary_action_btn.setMinimumWidth(170)
+        self.primary_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.action_box.addWidget(self.primary_action_btn)
 
         h_layout.addLayout(self.action_box)
         layout.addWidget(header_card)
 
-        # ROM / Assets Box
-        asset_box = QFrame()
-        asset_box.setStyleSheet("background-color: #131b2e; border: 1px solid #1e293b; border-radius: 10px; padding: 14px;")
-        asset_layout = QHBoxLayout(asset_box)
-
-        asset_info = QVBoxLayout()
-        asset_title = QLabel("💾 Erforderliche Spieldaten / Original-ROM")
-        asset_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
-        asset_info.addWidget(asset_title)
-
-        desc_text = self.project.required_assets_desc or "Keine speziellen Spieldateien erforderlich oder automatische Extraktion."
-        asset_desc = QLabel(desc_text)
-        asset_desc.setStyleSheet("font-size: 12px; color: #cbd5e1;")
-        asset_desc.setWordWrap(True)
-        asset_info.addWidget(asset_desc)
-        asset_layout.addLayout(asset_info, 1)
-
-        manage_assets_btn = QPushButton("Dateien bereitstellen...")
-        manage_assets_btn.setProperty("class", "secondary-btn")
-        manage_assets_btn.clicked.connect(self._open_assets)
-        asset_layout.addWidget(manage_assets_btn)
-
-        layout.addWidget(asset_box)
+        # Dynamic ROM / Assets Box
+        self.asset_box = QFrame()
+        self.asset_layout = QHBoxLayout(self.asset_box)
+        self.asset_layout.setContentsMargins(16, 14, 16, 14)
+        self._refresh_asset_box()
+        layout.addWidget(self.asset_box)
 
         # Description Section
         desc_box = QFrame()
-        desc_box.setStyleSheet("background-color: #131b2e; border: 1px solid #1e293b; border-radius: 10px; padding: 16px;")
+        desc_box.setStyleSheet("background-color: #111726; border: 1px solid #1e293b; border-radius: 12px; padding: 18px;")
         desc_layout = QVBoxLayout(desc_box)
 
         desc_title = QLabel("Über dieses Projekt")
-        desc_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #f8fafc; margin-bottom: 6px;")
+        desc_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #ffffff; margin-bottom: 6px;")
         desc_layout.addWidget(desc_title)
 
         body_lbl = QLabel(self.project.full_desc or self.project.short_desc)
-        body_lbl.setStyleSheet("font-size: 13px; color: #cbd5e1; line-height: 1.5;")
+        body_lbl.setStyleSheet("font-size: 13px; color: #cbd5e1; line-height: 1.6;")
         body_lbl.setWordWrap(True)
         desc_layout.addWidget(body_lbl)
 
@@ -164,25 +148,101 @@ class GameDetailView(QWidget):
 
         # Release Details / Changelog Box
         self.rel_box = QFrame()
-        self.rel_box.setStyleSheet("background-color: #131b2e; border: 1px solid #1e293b; border-radius: 10px; padding: 16px;")
+        self.rel_box.setStyleSheet("background-color: #111726; border: 1px solid #1e293b; border-radius: 12px; padding: 18px;")
         self.rel_layout = QVBoxLayout(self.rel_box)
 
         self.rel_title = QLabel("📦 Release-Informationen")
-        self.rel_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #f8fafc;")
+        self.rel_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #ffffff;")
         self.rel_layout.addWidget(self.rel_title)
 
         self.rel_info_lbl = QLabel("Informationen werden von GitHub abgerufen...")
-        self.rel_info_lbl.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.rel_info_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; margin-top: 4px;")
         self.rel_layout.addWidget(self.rel_info_lbl)
 
         layout.addWidget(self.rel_box)
         layout.addStretch(1)
 
+    def _refresh_asset_box(self):
+        # Clear layout
+        while self.asset_layout.count():
+            item = self.asset_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                subl = item.layout()
+                while subl.count():
+                    si = subl.takeAt(0)
+                    if si.widget():
+                        si.widget().deleteLater()
+
+        asset_info = QVBoxLayout()
+        asset_info.setSpacing(4)
+
+        if not self.project.required_files:
+            self.asset_box.setStyleSheet("background-color: #111726; border: 1px solid #1e293b; border-radius: 12px;")
+            title = QLabel("💾 Spieldaten: Keine externen ROM-Dateien erforderlich")
+            title.setStyleSheet("font-size: 14px; font-weight: 700; color: #38bdf8;")
+            desc = QLabel("Dieses Projekt enthält alle benötigten Spieldaten oder extrahiert diese automatisch beim ersten Start.")
+            desc.setStyleSheet("font-size: 12px; color: #94a3b8;")
+            desc.setWordWrap(True)
+            asset_info.addWidget(title)
+            asset_info.addWidget(desc)
+            self.asset_layout.addLayout(asset_info, 1)
+            return
+
+        has_assets, missing = self.library_mgr.check_game_assets(self.project)
+        if has_assets:
+            self.asset_box.setStyleSheet("""
+                background-color: #042217;
+                border: 1px solid #059669;
+                border-radius: 12px;
+            """)
+            title = QLabel("✅ Alle erforderlichen Spieldateien / ROMs vorhanden!")
+            title.setStyleSheet("font-size: 14px; font-weight: 800; color: #34d399;")
+            desc = QLabel(f"Erforderliche Dateien ({', '.join(self.project.required_files)}) wurden im Spielverzeichnis gefunden. Das Spiel ist startbereit.")
+            desc.setStyleSheet("font-size: 12px; color: #a7f3d0;")
+            desc.setWordWrap(True)
+            asset_info.addWidget(title)
+            asset_info.addWidget(desc)
+            self.asset_layout.addLayout(asset_info, 1)
+
+            manage_btn = QPushButton("Dateien verwalten")
+            manage_btn.setProperty("class", "secondary-btn")
+            manage_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            manage_btn.clicked.connect(self._open_assets)
+            self.asset_layout.addWidget(manage_btn)
+        else:
+            self.asset_box.setStyleSheet("""
+                background-color: #2e1505;
+                border: 1px solid #d97706;
+                border-radius: 12px;
+            """)
+            title = QLabel("⚠️ Original-Spieldateien / ROMs noch nicht hinterlegt")
+            title.setStyleSheet("font-size: 14px; font-weight: 800; color: #fbbf24;")
+            desc_text = self.project.required_assets_desc or f"Fehlend: {', '.join(missing)}"
+            desc = QLabel(desc_text)
+            desc.setStyleSheet("font-size: 12px; color: #fde68a;")
+            desc.setWordWrap(True)
+            asset_info.addWidget(title)
+            asset_info.addWidget(desc)
+            self.asset_layout.addLayout(asset_info, 1)
+
+            manage_btn = QPushButton("ROM bereitstellen...")
+            manage_btn.setProperty("class", "primary-btn")
+            manage_btn.setStyleSheet("""
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d97706, stop:1 #f59e0b);
+                color: #ffffff;
+                border: 1px solid #fbbf24;
+            """)
+            manage_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            manage_btn.clicked.connect(self._open_assets)
+            self.asset_layout.addWidget(manage_btn)
+
     def _check_release(self):
         if not self.project.has_binary_releases:
             self.primary_action_btn.setText("🔨 Aus Source kompilieren")
             self.primary_action_btn.setProperty("class", "primary-btn")
-            self.primary_action_btn.setStyleSheet("background-color: #d97706; color: #ffffff; font-weight: bold;")
+            self.primary_action_btn.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d97706, stop:1 #f59e0b); color: #ffffff; font-weight: bold; border: 1px solid #fbbf24;")
             self.primary_action_btn.setEnabled(True)
             self.primary_action_btn.clicked.connect(lambda: self.compile_requested.emit(self.project.id))
             self.rel_info_lbl.setText("Dies ist ein Source-Decompilierungs-Projekt. Klicke auf 'Aus Source kompilieren', um den Code herunterzuladen und nativ zu bauen.")
@@ -198,6 +258,7 @@ class GameDetailView(QWidget):
         if self.project.can_compile:
             src_compile_btn = QPushButton("🔨 Aus Source bauen")
             src_compile_btn.setProperty("class", "secondary-btn")
+            src_compile_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             src_compile_btn.clicked.connect(lambda: self.compile_requested.emit(self.project.id))
             self.action_box.addWidget(src_compile_btn)
 
@@ -211,10 +272,14 @@ class GameDetailView(QWidget):
         is_installed = self.library_mgr.is_installed(self.project.id)
 
         if release:
-            size_mb = f"{release.asset_size / (1024*1024):.1f} MB" if release.asset_size else ""
+            size_mb = f"• {release.asset_size / (1024*1024):.1f} MB" if release.asset_size else ""
+            pub_date = release.published_at[:10] if release.published_at else "k. A."
             self.rel_info_lbl.setText(
-                f"Neueste Version: <b>{release.tag_name}</b> ({release.asset_name} {size_mb})<br>"
-                f"Veröffentlicht am: {release.published_at[:10]}"
+                f"<div style='font-size: 13px; line-height: 1.6;'>"
+                f"Neueste Version: <b style='color: #38bdf8;'>{release.tag_name}</b> {size_mb}<br>"
+                f"Datei: <code style='color: #cbd5e1;'>{release.asset_name}</code><br>"
+                f"Veröffentlicht am: {pub_date}"
+                f"</div>"
             )
             self.rel_info_lbl.setTextFormat(Qt.TextFormat.RichText)
 
@@ -222,8 +287,9 @@ class GameDetailView(QWidget):
                 installed_game = self.library_mgr.get_installed(self.project.id)
                 self._setup_installed_state()
                 if installed_game and installed_game.version != release.tag_name:
-                    update_btn = QPushButton(f"⬆ Aktualisieren ({release.tag_name})")
+                    update_btn = QPushButton(f"⬆ Aktualisieren auf {release.tag_name}")
                     update_btn.setProperty("class", "primary-btn")
+                    update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
                     update_btn.clicked.connect(lambda: self.download_requested.emit(self.project.id, release))
                     self.action_box.addWidget(update_btn)
             else:
@@ -260,3 +326,5 @@ class GameDetailView(QWidget):
     def _open_assets(self):
         dlg = AssetDialog(self.project, self.library_mgr, self)
         dlg.exec()
+        self._refresh_asset_box()
+
