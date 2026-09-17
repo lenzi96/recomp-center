@@ -285,4 +285,30 @@ QComboBox QAbstractItemView {
     outline: none;
     padding: 4px;
 }
+
+/* Checkbox Styling */
+QCheckBox {
+    color: #f1f5f9;
+    font-size: 13px;
+    font-weight: 500;
+    spacing: 10px;
+}
+QCheckBox:hover {
+    color: #ffffff;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    background-color: #111726;
+    border: 1.5px solid #475569;
+    border-radius: 5px;
+}
+QCheckBox::indicator:hover {
+    border-color: #38bdf8;
+    background-color: #151d30;
+}
+QCheckBox::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #0ea5e9);
+    border-color: #38bdf8;
+}
 """
