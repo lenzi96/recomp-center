@@ -99,12 +99,12 @@ class GitHubClient:
         if not assets:
             return None
 
-        # Exclude Windows/Mac/Switch/iOS/Android assets explicitly
+        # Exclude non-Linux PC platforms explicitly
         exclude_keywords = [
-            ".exe", ".msi", "windows", "win32", "win64", "win-x64", "win.zip",
+            ".exe", ".msi", "windows", "win32", "win64", "win-x64", "win.zip", "win-release",
             ".dmg", "macos", "osx", "darwin",
-            ".nsp", ".nro", "switch", "wiiu", "3ds", "vita",
-            ".apk", ".ipa", "android", "ios",
+            ".nsp", ".nro", "switch", "wiiu", "3ds", "vita", ".vpk", ".opk", ".pkg",
+            ".apk", ".aab", ".ipa", "android", "ios", "mobile",
             ".deb", ".rpm"  # Prefer standalone AppImage / portable tarball for portable manager
         ]
 
@@ -124,28 +124,27 @@ class GitHubClient:
             candidates.append(a)
 
         if not candidates:
-            # Fall back to all assets excluding .exe and .dmg
-            candidates = [a for a in assets if not a.get("name", "").lower().endswith((".exe", ".dmg", ".msi"))]
+            return None
 
-        # Prioritize AppImages
+        # 1. Prioritize AppImages
         for a in candidates:
             if a.get("name", "").lower().endswith(".appimage"):
                 return a
 
-        # Prioritize Linux tar.gz / tar.xz / zip with linux or x86_64 in name
-        for a in candidates:
-            fname = a.get("name", "").lower()
-            if "linux" in fname and any(fname.endswith(ext) for ext in [".tar.gz", ".tgz", ".tar.xz", ".zip", ""]):
-                return a
-
-        # Check for any candidate matching custom patterns
+        # 2. Check for any candidate matching custom patterns (e.g. linux-x64, etc.)
         for pattern in patterns:
             pat_lower = pattern.lower()
             for a in candidates:
                 if pat_lower in a.get("name", "").lower():
                     return a
 
-        # Default to first non-windows candidate
+        # 3. Prioritize Linux tar.gz / tar.xz / zip with linux or x86_64 in name
+        for a in candidates:
+            fname = a.get("name", "").lower()
+            if "linux" in fname and any(fname.endswith(ext) for ext in [".tar.gz", ".tgz", ".tar.xz", ".zip", ""]):
+                return a
+
+        # 4. Default to first candidate that passed all PC Linux filters
         if candidates:
             return candidates[0]
 
