@@ -790,8 +790,26 @@ CATALOG_PROJECTS: List[GameProject] = [
     ),
 
     # =============================================================
-    # 5. NINTENDO GAMECUBE & WII DECOMPS
+    # 5. NINTENDO GAMECUBE & WII (PORTS & DECOMPS)
     # =============================================================
+    GameProject(
+        id="dusklight",
+        name="The Legend of Zelda: Twilight Princess (Dusklight)",
+        short_desc="Nativer PC-Port von Twilight Princess (GameCube & Wii) mit 60+ FPS, Widescreen und Mod-Support.",
+        author="Twilit Realm",
+        repo="TwilitRealm/dusklight",
+        project_type=ProjectType.DECOMP_PORT,
+        original_platform="Nintendo GameCube & Wii",
+        website_url="https://twilitrealm.dev",
+        has_binary_releases=True,
+        linux_asset_patterns=["linux-x86_64.appimage", "linux", "x86_64", "appimage"],
+        executable_hints=["Dusklight", "dusklight", "*.AppImage"],
+        required_assets_desc="Original GameCube oder Wii Disc-Image (USA, EUR oder JAP als .iso, .gcm, .rvz, .wbfs).",
+        required_files=["game.iso"],
+        full_desc="Dusklight (ehemals Dusk) ist ein nativer C++ Port von Twilight Princess auf Basis der Aurora-Engine. Unterstützt unbegrenzte Bildraten, 4K/Widescreen, Gyro-Zielen, integrierten Randomizer und Mod-Browser.",
+        color_accent="#d97706",
+        icon_text="🐺"
+    ),
     GameProject(
         id="sms-decomp",
         name="Super Mario Sunshine Decompilation",

@@ -108,6 +108,14 @@ class GitHubClient:
             ".deb", ".rpm"  # Prefer standalone AppImage / portable tarball for portable manager
         ]
 
+        # Filter out mismatching CPU architectures
+        import platform
+        machine = platform.machine().lower()
+        if machine in ("x86_64", "amd64"):
+            exclude_keywords.extend(["arm64", "aarch64", "armv7", "armhf"])
+        elif machine in ("aarch64", "arm64"):
+            exclude_keywords.extend(["x86_64", "amd64", "x86", "i686", "i386"])
+
         candidates = []
         for a in assets:
             fname = a.get("name", "").lower()

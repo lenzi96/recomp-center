@@ -544,6 +544,12 @@ ROM_MATCH_RULES: Dict[str, Dict[str, any]] = {
         "excludes": ["time", "zeit", "darkness", "dunkelheit"],
         "extensions": [".nds", ".zip"],
         "target_name": "baserom.nds"
+    },
+    "dusklight": {
+        "keywords": ["twilight princess", "twilight_princess", "dusklight", "gz2e", "gz2p", "gz2j", "rzde", "rzdp"],
+        "excludes": [],
+        "extensions": [".iso", ".gcm", ".rvz", ".ciso", ".wbfs", ".zip"],
+        "target_name": "game.iso"
     }
 }
 
@@ -671,7 +677,7 @@ class RomAutoMatcher:
             if found_rom.lower().endswith(".zip"):
                 with zipfile.ZipFile(found_rom, 'r') as z:
                     cand_names = [n for n in z.namelist() if not n.endswith('/') and '__MACOSX' not in n]
-                    valid_names = [n for n in cand_names if any(n.lower().endswith(e) for e in [".z64", ".v64", ".n64", ".gba", ".gb", ".bin", ".rsdk"])]
+                    valid_names = [n for n in cand_names if any(n.lower().endswith(e) for e in [".z64", ".v64", ".n64", ".gba", ".gb", ".gbc", ".nds", ".bin", ".rsdk", ".iso", ".gcm", ".rvz", ".ciso", ".wbfs", ".sfc", ".smc"])]
                     if valid_names:
                         chosen_entry = valid_names[0]
                     elif cand_names:
